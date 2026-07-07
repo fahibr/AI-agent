@@ -20,6 +20,7 @@ SELECTED_COLUMNS = [
     "Brand",
     "Supplier",
     "Product Category Code",
+    "Product Category",
     "Brand Code",
     "Model (Item Code)",
     "Finish",
@@ -39,6 +40,24 @@ DISCONTINUED_COLORS = {
     "C00000",   # dark red
     # add more hex values after inspecting your file
 }
+
+YELLOW_COLORS = {
+    "FFFF00", # common Excel light yellow
+    "FFEB9C",   
+    "FFC000",
+}
+
+# Yellow = field updates only (NOT price)
+YELLOW_SCAN_COLUMNS = [
+    "Product Category Code",
+    "Product Category",
+    "Brand Code",      
+    MODEL_COLUMN,
+    DESCRIPTION_COLUMN,
+    FINISH_COLUMN,    
+    "Unit"   
+    
+]
 
 STRING_COLUMNS = [
     "Brand", "Supplier", "Product Category Code", "Brand Code",
@@ -152,19 +171,39 @@ def _enforce_consistency(df: pd.DataFrame) -> pd.DataFrame:
 
 # Check if a color indicates discontinued status
 def _is_discontinued(color_hex: str | None) -> bool:
-    """Return True if the price cell color indicates discontinued."""
-    if not color_hex:
-        return False  # no color = not discontinued
-    if str(color_hex).startswith("theme:"):
-        return False  # handle theme colors separately if needed
+    if not color_hex or str(color_hex).startswith("theme:"):
+        return False
     return str(color_hex).upper()[-6:] in DISCONTINUED_COLORS
+
+# Check if a color indicates changes product information
+def _is_yellow(color_hex: str | None) -> bool:
+    if not color_hex or str(color_hex).startswith("theme:"):
+        return False
+    return str(color_hex).upper()[-6:] in YELLOW_COLORS
+
+
+def _get_updated_fields(color_by_column: dict[str, str | None]) -> str:
+    """Return comma-separated column names that have yellow fill."""
+    updated = [
+        col for col in YELLOW_SCAN_COLUMNS
+        if _is_yellow(color_by_column.get(col))
+    ]
+    return ", ".join(updated) if updated else ""
+
+
+def _resolve_status(color_by_column: dict[str, str | None]) -> str:
+    """Status is only Discontinued (red price) or Active."""
+    price_color = color_by_column.get(PRICE_COLUMN)
+    if _is_discontinued(price_color):
+        return "Discontinued"
+    return "Active"
 
 
 # ── Step 5: Add colors AFTER merge ──────────────────────────────────
-def _attach_price_colors(path: str, df: pd.DataFrame) -> pd.DataFrame:
-    """Read fill color from price column and attach status to merged rows."""
+def _attach_cell_status(path: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Read red on price (discontinued) and yellow on info columns (updated fields)."""
     wb = load_workbook(path, data_only=True, read_only=False)
-    color_lookup: dict[tuple, str | None] = {}
+    color_lookup: dict[tuple, dict[str, str | None]] = {}
     for sheet_name in df["source_sheet"].unique():
         if sheet_name not in wb.sheetnames:
             continue
@@ -174,45 +213,61 @@ def _attach_price_colors(path: str, df: pd.DataFrame) -> pd.DataFrame:
             for idx, cell in enumerate(ws[HEADER_ROW], start=1)
             if cell.value is not None
         }
-        model_col = headers.get(MODEL_COLUMN)
-        price_col = headers.get(PRICE_COLUMN)
-        if not model_col or not price_col:
+        model_col_idx = headers.get(MODEL_COLUMN)
+        if not model_col_idx:
             continue
+        # Scan price (red only) + info columns (yellow)
+        columns_to_read = {PRICE_COLUMN: headers.get(PRICE_COLUMN)}
+        for col in YELLOW_SCAN_COLUMNS:
+            if col in headers:
+                columns_to_read[col] = headers[col]
         for row_idx in range(HEADER_ROW + 1, ws.max_row + 1):
-            model = ws.cell(row=row_idx, column=model_col).value
+            model = ws.cell(row=row_idx, column=model_col_idx).value
             if model is None:
                 continue
             model_key = str(model).strip().upper()
-            price_cell = ws.cell(row=row_idx, column=price_col)
-            fill = price_cell.fill
-            color_hex = None
-            if fill and fill.fill_type:
-                color_hex = _resolve_color_hex(fill.fgColor)
-            color_lookup[(sheet_name, model_key)] = color_hex
+            row_colors: dict[str, str | None] = {}
+            for col_name, col_idx in columns_to_read.items():
+                if not col_idx:
+                    continue
+                cell = ws.cell(row=row_idx, column=col_idx)
+                fill = cell.fill
+                color_hex = None
+                if fill and fill.fill_type:
+                    color_hex = _resolve_color_hex(fill.fgColor)
+                row_colors[col_name] = color_hex
+            color_lookup[(sheet_name, model_key)] = row_colors
     wb.close()
     df = df.copy()
     df["Status"] = df.apply(
-        lambda r: "Discontinued"
-        if _is_discontinued(color_lookup.get((r["source_sheet"], r[MODEL_COLUMN])))
-        else "Active",
+        lambda r: _resolve_status(
+            color_lookup.get((r["source_sheet"], r[MODEL_COLUMN]), {})
+        ),
+        axis=1,
+    )
+    df["Updated_Fields"] = df.apply(
+        lambda r: _get_updated_fields(
+            color_lookup.get((r["source_sheet"], r[MODEL_COLUMN]), {})
+        ),
         axis=1,
     )
     return df[
-        SELECTED_COLUMNS + ["source_sheet", "Status", "is_duplicate"]
+        SELECTED_COLUMNS + ["source_sheet", "Status", "Updated_Fields", "is_duplicate"]
     ].reset_index(drop=True)
 
 
 # ── Main processing function ────────────────────────────────────────
 def process_cleaned_data(path: str) -> pd.DataFrame | None:
-    """Merge all sheets, enforce consistency, then identify price colors."""
+    """Merge all sheets, enforce consistency, then identify cell statuses."""
     merged = _merge_all_sheets(path)
     if merged is None:
         print("❌ No sheets were successfully processed")
         return None
     consistent = _enforce_consistency(merged)
-    final = _attach_price_colors(path, consistent)
+    final = _attach_cell_status(path, consistent)
     print(f"✅ Final master table: {len(final)} rows, {len(final.columns)} columns")
     return final
+
 def _get_dataframe(path: str = DEFAULT_EXCEL_PATH) -> pd.DataFrame | None:
     global _cached_df
     if _cached_df is None:
@@ -225,6 +280,8 @@ def load_price_list(path: str = DEFAULT_EXCEL_PATH) -> str:
     global _cached_df
     _cached_df = process_cleaned_data(path)
     discontinued_count = (_cached_df["Status"] == "Discontinued").sum()
+    active_count = (_cached_df["Status"] == "Active").sum()
+    with_updates = (_cached_df["Updated_Fields"] != "").sum()
     if _cached_df is None:
         return "No sheets were successfully processed."
     print("\n--- First 5 rows of merged master table ---")
@@ -233,8 +290,9 @@ def load_price_list(path: str = DEFAULT_EXCEL_PATH) -> str:
     return (
         f"Merged {len(_cached_df)} rows from {_cached_df['source_sheet'].nunique()} sheets. "
         f"Columns: {', '.join(_cached_df.columns.astype(str))}. "
-        f"Duplicates removed: {(_cached_df['is_duplicate'] == False).sum()} unique rows kept."
-        f"Discontinued: {discontinued_count}, Active: {len(_cached_df) - discontinued_count}"
+       
+        f"Active: {active_count}, Discontinued: {discontinued_count}, "
+        f"Products with updated fields (yellow): {with_updates}"
     )
 
 
@@ -249,17 +307,23 @@ def find_model(model_code: str, path: str = DEFAULT_EXCEL_PATH) -> str:
         return f"No model found for '{model_code}'."
     lines = []
     for _, row in matches.iterrows():
+        updated = row.get("Updated_Fields", "")
+        updated_text = (
+            f"Updated fields: {updated}"
+            if updated and str(updated).strip()
+            else "Updated fields: none"
+        )
         lines.append(
             f"Brand: {row['Brand']} | "
-            f"Supplier: {row['source_sheet']}"
+            f"Supplier: {row['Supplier']} | "
+            f"Sheet: {row['source_sheet']} | "
             f"Model: {row[MODEL_COLUMN]} | "
             f"Finish: {row[FINISH_COLUMN]} | "
             f"Description: {row[DESCRIPTION_COLUMN]} | "
             f"Price: {row[PRICE_COLUMN]} | "
             f"UOM: {row['Unit']} | "
-            f"Status: {row['Status']} | "   # Discontinued or Active
-            
-            
+            f"Status: {row['Status']} | "
+            f"{updated_text}"
         )
     return "\n".join(lines)
 
@@ -287,6 +351,26 @@ def remove_discontinued_models(path: str = DEFAULT_EXCEL_PATH) -> str:
         f"Rows before: {total_before}, rows after: {total_after}. "
         f"Remaining: {total_after} active products."
     )
+
+@tool
+def list_updated_products(path: str = DEFAULT_EXCEL_PATH) -> str:
+    """List products where Model, Description, or other info fields were updated (yellow cells)."""
+    df = _get_dataframe(path)
+    if df is None:
+        return "Price list not loaded. Call load_price_list first."
+    updated = df[df["Updated_Fields"] != ""]
+    if updated.empty:
+        return "No yellow-highlighted field updates found."
+    lines = []
+    for _, row in updated.head(50).iterrows():
+        lines.append(
+            f"Model: {row[MODEL_COLUMN]} | "
+            f"Updated: {row['Updated_Fields']} | "
+            f"Description: {row[DESCRIPTION_COLUMN]} | "
+            f"Status: {row['Status']} | "
+            f"Sheet: {row['source_sheet']}"
+        )
+    return "\n".join(lines)
 
 @tool
 def export_active_list(
@@ -318,13 +402,14 @@ model = AzureChatOpenAI(
     ),
     openai_api_version=os.getenv("OPENAI_API_VERSION", "2025-08-07"),
 )
-tools = [load_price_list, remove_discontinued_models, find_model, export_active_list]
+tools = [load_price_list, remove_discontinued_models, list_updated_products, find_model, export_active_list, ]
 agent = create_agent(model, tools=tools)
 response = agent.invoke({
     "messages": [(
         "human",
         "Load the merged price list, remove all discontinued models, "
         "then show how many active products remain."
+        "the count of updated products (yellow cells)"
         "export the active list to active_price_list.xlsx"
     )]
 })
