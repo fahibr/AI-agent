@@ -1,33 +1,32 @@
 import os
 from dotenv import load_dotenv
-
-# Conceptual LangChain/LangGraph setup
-from langchain_openai import ChatOpenAI
-from langgraph.prebuilt import create_react_agent
+from langchain_openai import AzureChatOpenAI
+from langchain.agents import create_agent
 from langchain_core.tools import tool
 
-# Load environment variables from .env file
 load_dotenv()
 
-
-# Verify API key exists
 if not os.getenv("AZURE_OPENAI_API_KEY"):
     raise ValueError("AZURE_OPENAI_API_KEY not found in .env file")
 
-
-# Define a simple tool for the agent
 @tool
 def add_numbers(a: int, b: int) -> int:
     """Add two numbers."""
     return a + b
 
+model = AzureChatOpenAI(
+    azure_deployment=os.getenv("DEPLOYMENT_NAME"),
+    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+    api_version=os.getenv("API_VERSION", "2025-01-01-preview"),
+    azure_endpoint=os.getenv(
+        "AZURE_OPENAI_ENDPOINT",
+        "https://aa-openai-sweden.openai.azure.com/",
+    ),
+    openai_api_version=os.getenv("OPENAI_API_VERSION", "2025-08-07")
+)
 
-# Initialize the model and agent
-model = ChatOpenAI(model="gpt-5-nano", api_key=os.getenv("AZURE_OPENAI_API_KEY"))
 tools = [add_numbers]
-agent = create_react_agent(model, tools=tools)
+agent = create_agent(model, tools=tools)
 
-# Invoke the agent
 response = agent.invoke({"messages": [("human", "What is 10 + 20?")]})
-
-print("Agent Response:", response)
+print("Agent Response:", response["messages"][1].content) #Print the last message from the agent's response
