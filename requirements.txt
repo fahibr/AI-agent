@@ -1,0 +1,26 @@
+# Core Python packages
+python-dotenv==1.2.1
+
+# Web Framework
+streamlit>=1.53.0
+
+# Data Processing for excel
+openpyxl>=3.1.5
+
+# Azure OpenAI
+openai>=2.15.0
+
+# LangChain and Vector Store
+langchain>=1.2.6
+langchain-community>=0.4.1
+langchain-openai>=1.1.7
+chromadb>=1.4.1
+
+# Authentication & Security
+pycryptodome>=3.2.3
+
+# Windows COM automation (optional, Windows only)
+pywin32>=311; sys_platform == 'win32'
+
+# Additional utilities
+tiktoken>=0.12.0
