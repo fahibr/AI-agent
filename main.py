@@ -469,12 +469,16 @@ if __name__ == "__main__":
             "messages": [
                 (
                     "human",
-                    "Load the merged price list, remove all discontinued models, "
-                    "then show how many active products remain, "
-                    "the count of updated products (yellow cells), "
-                    "the count of new products (green cells), "
-                    "export the active list to active_price_list.xlsx, "
-                    "and list all new products.",
+                    "You are Agent 1: Product Change Detection Agent.\n"
+                    "Your task is to compare the cleaned master pricelist against the current pricebook.\n\n"
+                    "You must identify:\n"
+                    "1. New additional products\n"
+                    "2. Updated products\n"
+                    "3. Discontinued products\n"
+                    "4. Duplicate records\n"
+                    "5. Data quality issues\n\n"
+                    "Output requirements:\n"
+                    "- Generate an Excel output file active_price_list.xlsx.",
                 )
             ]
         }
