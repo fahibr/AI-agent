@@ -76,6 +76,11 @@ STRING_COLUMNS = [
 _cached_df: pd.DataFrame | None = None
 
 
+def _fill_blank_finish(series: pd.Series) -> pd.Series:
+    """Normalize missing/blank finish values to a dash."""
+    return series.fillna("-")
+
+
 # Step 1: Read one sheet
 def _resolve_color_hex(color) -> str | None:
     if color is None:
@@ -118,6 +123,7 @@ def _normalize_sheet(df: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
     for col in STRING_COLUMNS:
         normalized[col] = normalized[col].astype("string").str.strip()
         normalized[col] = normalized[col].replace("", pd.NA)
+    normalized[FINISH_COLUMN] = _fill_blank_finish(normalized[FINISH_COLUMN])
     # Standardize model code
     normalized[MODEL_COLUMN] = normalized[MODEL_COLUMN].str.upper()
     # Price as numeric
@@ -159,6 +165,7 @@ def _enforce_consistency(df: pd.DataFrame) -> pd.DataFrame:
         df[col] = df[col].astype("string").str.strip().str.upper() if col == MODEL_COLUMN \
             else df[col].astype("string").str.strip()
         df[col] = df[col].replace("", pd.NA)
+    df[FINISH_COLUMN] = _fill_blank_finish(df[FINISH_COLUMN])
     df[PRICE_COLUMN] = pd.to_numeric(df[PRICE_COLUMN], errors="coerce")
     # Flag duplicate model codes across sheets
     dup_mask = df.duplicated(subset=[MODEL_COLUMN, "Brand", "Finish"], keep=False)
