@@ -9,12 +9,13 @@ from openpyxl.styles.colors import COLOR_INDEX
 
 load_dotenv()
 
-if not os.getenv("AZURE_OPENAI_API_KEY"):
-    raise ValueError("AZURE_OPENAI_API_KEY not found in .env file")
-
 EXCLUDE_SHEETS = {"Summary"}
 
 DEFAULT_EXCEL_PATH = "HK Master Price List - July 2026 OS_CLEANED.xlsm"
+PRICEBOOK_EXCEL_PATH = "AD_July2026 (en_HK).xlsx"
+ACTIVE_PRICE_LIST_PATH = "active_price_list.xlsx"
+PRICEBOOK_SHEET = "HardwareStandard"
+VALIDATION_OUTPUT_PATH = "pricebook_validation_result.xlsx"
 
 HEADER_ROW = 4
 
@@ -446,42 +447,220 @@ def export_active_list(
     return f"Exported {len(active_df)} active rows to {output_path}"
 
 
-# ── Agent setup ─────────────────────────────────────────────────────
-model = AzureChatOpenAI(
-    azure_deployment=os.getenv("DEPLOYMENT_NAME"),
-    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-    api_version=os.getenv("API_VERSION", "2025-01-01-preview"),
-    azure_endpoint=os.getenv(
-        "AZURE_OPENAI_ENDPOINT",
-        "https://aa-openai-sweden.openai.azure.com/",
-    ),
-    openai_api_version=os.getenv("OPENAI_API_VERSION", "2025-08-07"),
-)
-tools = [
-    load_price_list,
-    remove_discontinued_models,
-    list_updated_products,
-    list_new_products,
-    find_model,
-    export_active_list,
-]
-agent = create_agent(model, tools=tools)
+# ── Pricebook validation ────────────────────────────────────────────
+PB_HDW_TYPE_ID = "HDW_TYPE_ID"
+PB_PRODUCT_LINE = "PRODUCT_LINE"
+PB_MANUFACTURER = "Manufacturer"
+PB_MODEL = "PRINT_ITEM_DESC"
+PB_FINISH = "PRINT_FINISH"
+PB_DESCRIPTION = "HDW_TYPE_DESCRIPTION"
+PB_UNIT = "UOM"
+PB_PRICE = "PRICE"
+PB_ATTR1 = "ATTR1"
 
-# Example usage of the agent
-if __name__ == "__main__":
-    response = agent.invoke(
-        {
-            "messages": [
-                (
-                    "human",
-                    "Load the merged price list, remove all discontinued models, "
-                    "then show how many active products remain, "
-                    "the count of updated products (yellow cells), "
-                    "the count of new products (green cells), "
-                    "export the active list to active_price_list.xlsx, "
-                    "and how many all new products.",
-                )
-            ]
-        }
+MASTER_BRAND_CODE = "Brand Code"
+MASTER_CATEGORY_CODE = "Product Category Code"
+MASTER_PRODUCT_CATEGORY = "Product Category"
+MASTER_MODEL_CODE = "Model (Item Code)"
+MASTER_FINISH = "Finish"
+MASTER_DESCRIPTION = "Description"
+MASTER_UNIT = "Unit"
+MASTER_PRICE = "Project/ Spec Price"
+
+PRICEBOOK_FIELD_MAPPINGS = {
+    PB_HDW_TYPE_ID: MASTER_CATEGORY_CODE,
+    PB_PRODUCT_LINE: MASTER_PRODUCT_CATEGORY,
+    PB_MANUFACTURER: MASTER_BRAND_CODE,
+    PB_MODEL: MASTER_MODEL_CODE,
+    PB_FINISH: MASTER_FINISH,
+    PB_DESCRIPTION: MASTER_DESCRIPTION,
+    PB_UNIT: MASTER_UNIT,
+    PB_PRICE: MASTER_PRICE,
+}
+
+
+def _normalize_text(value) -> str:
+    return str(value).strip()
+
+
+def _values_match(pb_value, master_value, field_name: str) -> bool:
+    pb_text = _normalize_text(pb_value)
+    master_text = _normalize_text(master_value)
+    if field_name in {PB_PRICE, MASTER_PRICE}:
+        try:
+            return abs(float(pb_text) - float(master_text)) < 0.01
+        except ValueError:
+            pass
+    return pb_text == master_text
+
+
+def _build_composite_key(model: str, finish: str) -> str:
+    return f"{_normalize_text(model)}|{_normalize_text(finish)}"
+
+
+def run_pricebook_validation(
+    pricebook_path: str = PRICEBOOK_EXCEL_PATH,
+    master_path: str = ACTIVE_PRICE_LIST_PATH,
+    output_path: str = VALIDATION_OUTPUT_PATH,
+) -> str:
+    """Validate HardwareStandard sheet against the active price list."""
+    hws_df = pd.read_excel(pricebook_path, sheet_name=PRICEBOOK_SHEET)
+    master_df = pd.read_excel(master_path)
+
+    hws = hws_df.fillna("").astype(str).copy()
+    master = master_df.fillna("").astype(str).copy()
+
+    hws["KEY"] = hws.apply(
+        lambda row: _build_composite_key(row[PB_MODEL], row[PB_FINISH]),
+        axis=1,
     )
-    print("Agent Response:", response["messages"][-1].content)
+    master["KEY"] = master.apply(
+        lambda row: _build_composite_key(row[MASTER_MODEL_CODE], row[MASTER_FINISH]),
+        axis=1,
+    )
+
+    duplicate_keys = master[master.duplicated("KEY", keep=False)]["KEY"].unique().tolist()
+    master_lookup = (
+        master.drop_duplicates(subset=["KEY"], keep="first")
+        .set_index("KEY")
+        .to_dict("index")
+    )
+
+    issues = []
+    total_checked = 0
+    missing_products = 0
+    mismatch_count = 0
+    attr1_mismatch = 0
+
+    for _, row in hws.iterrows():
+        total_checked += 1
+        key = row["KEY"]
+
+        if key not in master_lookup:
+            missing_products += 1
+            issues.append(
+                {
+                    "Model": row[PB_MODEL],
+                    "Finish": row[PB_FINISH],
+                    "Field": "KEY",
+                    "Pricebook": key,
+                    "Master": "",
+                    "Issue": "Missing Product",
+                }
+            )
+            continue
+
+        master_row = master_lookup[key]
+
+        for pb_col, master_col in PRICEBOOK_FIELD_MAPPINGS.items():
+            pb_value = row[pb_col]
+            master_value = master_row[master_col]
+
+            if not _values_match(pb_value, master_value, pb_col):
+                mismatch_count += 1
+                issues.append(
+                    {
+                        "Model": row[PB_MODEL],
+                        "Finish": row[PB_FINISH],
+                        "Field": pb_col,
+                        "Pricebook": _normalize_text(pb_value),
+                        "Master": _normalize_text(master_value),
+                        "Issue": "Mismatch",
+                    }
+                )
+
+        expected_attr1 = _normalize_text(row[PB_MODEL])
+        actual_attr1 = _normalize_text(row[PB_ATTR1])
+        if actual_attr1 != expected_attr1:
+            attr1_mismatch += 1
+            issues.append(
+                {
+                    "Model": row[PB_MODEL],
+                    "Finish": row[PB_FINISH],
+                    "Field": PB_ATTR1,
+                    "Pricebook": actual_attr1,
+                    "Master": expected_attr1,
+                    "Issue": "ATTR1 Mismatch",
+                }
+            )
+
+    result_df = pd.DataFrame(issues)
+    result_df.to_excel(output_path, index=False)
+
+    duplicate_note = ""
+    if duplicate_keys:
+        duplicate_note = (
+            f"\nDuplicate master keys (first row used): {len(duplicate_keys)}"
+        )
+
+    return f"""Validation Completed
+
+Total Products Checked : {total_checked}
+Missing Products       : {missing_products}
+Field Mismatches       : {mismatch_count}
+ATTR1 Mismatches       : {attr1_mismatch}{duplicate_note}
+
+Validation report exported:
+{output_path}
+"""
+
+
+@tool
+def validate_pricebook(
+    pricebook_path: str = PRICEBOOK_EXCEL_PATH,
+    master_path: str = ACTIVE_PRICE_LIST_PATH,
+    output_path: str = VALIDATION_OUTPUT_PATH,
+) -> str:
+    """Validate HardwareStandard against active_price_list.xlsx and export findings."""
+    return run_pricebook_validation(pricebook_path, master_path, output_path)
+
+
+def _create_agent():
+    if not os.getenv("AZURE_OPENAI_API_KEY"):
+        raise ValueError("AZURE_OPENAI_API_KEY not found in .env file")
+
+    model = AzureChatOpenAI(
+        azure_deployment=os.getenv("DEPLOYMENT_NAME"),
+        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+        api_version=os.getenv("API_VERSION", "2025-01-01-preview"),
+        azure_endpoint=os.getenv(
+            "AZURE_OPENAI_ENDPOINT",
+            "https://aa-openai-sweden.openai.azure.com/",
+        ),
+        openai_api_version=os.getenv("OPENAI_API_VERSION", "2025-08-07"),
+    )
+    tools = [
+        load_price_list,
+        remove_discontinued_models,
+        list_updated_products,
+        list_new_products,
+        find_model,
+        export_active_list,
+        validate_pricebook,
+    ]
+    return create_agent(model, tools=tools)
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "validate":
+        print(run_pricebook_validation())
+    else:
+        agent = _create_agent()
+        response = agent.invoke(
+            {
+                "messages": [
+                    (
+                        "human",
+                        "Load the merged price list, remove all discontinued models, "
+                        "then show how many active products remain, "
+                        "the count of updated products (yellow cells), "
+                        "the count of new products (green cells), "
+                        "export the active list to active_price_list.xlsx, "
+                        "and how many all new products.",
+                    )
+                ]
+            }
+        )
+        print("Agent Response:", response["messages"][-1].content)

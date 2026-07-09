@@ -3,3 +3,4 @@
 __pycache__/
 .env.local
 main - backup.py
+pricebook_validation_result.xlsx
