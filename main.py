@@ -209,9 +209,11 @@ def _resolve_status(color_by_column: dict[str, str | None]) -> str:
     return "Active"
 
 
-def _is_new_product(color_by_column: dict[str, str | None]) -> bool:
-    """A product is new if any tracked field has green fill."""
-    return any(_is_green(color_by_column.get(col)) for col in SELECTED_COLUMNS)
+def _is_new_product(color_by_column: dict[str, str | None]) -> str:
+    """Return 'New' when any tracked field is green, otherwise 'Exisiting'."""
+    if any(_is_green(color_by_column.get(col)) for col in SELECTED_COLUMNS):
+        return "New"
+    return "Exisiting"
 
 
 # ── Step 5: Add colors AFTER merge ──────────────────────────────────
@@ -305,7 +307,7 @@ def load_price_list(path: str = DEFAULT_EXCEL_PATH) -> str:
     discontinued_count = (_cached_df["Status"] == "Discontinued").sum()
     active_count = (_cached_df["Status"] == "Active").sum()
     with_updates = (_cached_df["Updated_Fields"] != "").sum()
-    new_products = _cached_df["Is_New"].sum()
+    new_products = (_cached_df["Is_New"] == "New").sum()
     print("\n--- First 5 rows of merged master table ---")
     print(_cached_df.head(5))
     print("-------------------------------------------\n")
@@ -404,7 +406,7 @@ def list_new_products(path: str = DEFAULT_EXCEL_PATH) -> str:
         return "Price list not loaded. Call load_price_list first."
     if "Is_New" not in df.columns:
         return "Is_New column not found. Call load_price_list first."
-    new_products = df[df["Is_New"]]
+    new_products = df[df["Is_New"] == "New"]
     if new_products.empty:
         return "No new products (green-highlighted) found."
     lines = []
