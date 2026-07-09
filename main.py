@@ -279,11 +279,11 @@ def load_price_list(path: str = DEFAULT_EXCEL_PATH) -> str:
     """Load, merge, and clean all price list sheets into one consistent table."""
     global _cached_df
     _cached_df = process_cleaned_data(path)
+    if _cached_df is None:
+        return "No sheets were successfully processed."
     discontinued_count = (_cached_df["Status"] == "Discontinued").sum()
     active_count = (_cached_df["Status"] == "Active").sum()
     with_updates = (_cached_df["Updated_Fields"] != "").sum()
-    if _cached_df is None:
-        return "No sheets were successfully processed."
     print("\n--- First 5 rows of merged master table ---")
     print(_cached_df.head(5))
     print("-------------------------------------------\n")
@@ -402,16 +402,21 @@ model = AzureChatOpenAI(
     ),
     openai_api_version=os.getenv("OPENAI_API_VERSION", "2025-08-07"),
 )
-tools = [load_price_list, remove_discontinued_models, list_updated_products, find_model, export_active_list, ]
+tools = [load_price_list, remove_discontinued_models, list_updated_products, find_model, export_active_list]
 agent = create_agent(model, tools=tools)
-response = agent.invoke({
-    "messages": [(
-        "human",
-        "Load the merged price list, remove all discontinued models, "
-        "then show how many active products remain."
-        "the count of updated products (yellow cells)"
-        "export the active list to active_price_list.xlsx"
-    )]
-})
 
-print("Agent Response:", response["messages"][-1].content)
+if __name__ == "__main__":
+    response = agent.invoke(
+        {
+            "messages": [
+                (
+                    "human",
+                    "Load the merged price list, remove all discontinued models, "
+                    "then show how many active products remain, "
+                    "the count of updated products (yellow cells), "
+                    "and export the active list to active_price_list.xlsx.",
+                )
+            ]
+        }
+    )
+    print("Agent Response:", response["messages"][-1].content)
