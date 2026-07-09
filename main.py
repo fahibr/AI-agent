@@ -47,6 +47,10 @@ YELLOW_COLORS = {
     "FFC000",
 }
 
+GREEN_COLORS = {
+    "92D050",  # common Excel green
+}
+
 # Yellow = field updates only (NOT price)
 YELLOW_SCAN_COLUMNS = [
     "Product Category Code",
@@ -182,6 +186,12 @@ def _is_yellow(color_hex: str | None) -> bool:
     return str(color_hex).upper()[-6:] in YELLOW_COLORS
 
 
+def _is_green(color_hex: str | None) -> bool:
+    if not color_hex or str(color_hex).startswith("theme:"):
+        return False
+    return str(color_hex).upper()[-6:] in GREEN_COLORS
+
+
 def _get_updated_fields(color_by_column: dict[str, str | None]) -> str:
     """Return comma-separated column names that have yellow fill."""
     updated = [
@@ -197,6 +207,13 @@ def _resolve_status(color_by_column: dict[str, str | None]) -> str:
     if _is_discontinued(price_color):
         return "Discontinued"
     return "Active"
+
+
+def _is_new_product(color_by_column: dict[str, str | None]) -> str:
+    """Return 'New' when any tracked field is green, otherwise 'Exisiting'."""
+    if any(_is_green(color_by_column.get(col)) for col in SELECTED_COLUMNS):
+        return "New"
+    return "Exisiting"
 
 
 # ── Step 5: Add colors AFTER merge ──────────────────────────────────
@@ -216,9 +233,9 @@ def _attach_cell_status(path: str, df: pd.DataFrame) -> pd.DataFrame:
         model_col_idx = headers.get(MODEL_COLUMN)
         if not model_col_idx:
             continue
-        # Scan price (red only) + info columns (yellow)
+        # Scan price (red), info columns (yellow), and selected columns (green new-product markers).
         columns_to_read = {PRICE_COLUMN: headers.get(PRICE_COLUMN)}
-        for col in YELLOW_SCAN_COLUMNS:
+        for col in set(YELLOW_SCAN_COLUMNS + SELECTED_COLUMNS):
             if col in headers:
                 columns_to_read[col] = headers[col]
         for row_idx in range(HEADER_ROW + 1, ws.max_row + 1):
@@ -251,8 +268,14 @@ def _attach_cell_status(path: str, df: pd.DataFrame) -> pd.DataFrame:
         ),
         axis=1,
     )
+    df["Is_New"] = df.apply(
+        lambda r: _is_new_product(
+            color_lookup.get((r["source_sheet"], r[MODEL_COLUMN]), {})
+        ),
+        axis=1,
+    )
     return df[
-        SELECTED_COLUMNS + ["source_sheet", "Status", "Updated_Fields", "is_duplicate"]
+        SELECTED_COLUMNS + ["source_sheet", "Status", "Updated_Fields", "Is_New", "is_duplicate"]
     ].reset_index(drop=True)
 
 
@@ -279,11 +302,12 @@ def load_price_list(path: str = DEFAULT_EXCEL_PATH) -> str:
     """Load, merge, and clean all price list sheets into one consistent table."""
     global _cached_df
     _cached_df = process_cleaned_data(path)
+    if _cached_df is None:
+        return "No sheets were successfully processed."
     discontinued_count = (_cached_df["Status"] == "Discontinued").sum()
     active_count = (_cached_df["Status"] == "Active").sum()
     with_updates = (_cached_df["Updated_Fields"] != "").sum()
-    if _cached_df is None:
-        return "No sheets were successfully processed."
+    new_products = (_cached_df["Is_New"] == "New").sum()
     print("\n--- First 5 rows of merged master table ---")
     print(_cached_df.head(5))
     print("-------------------------------------------\n")
@@ -292,7 +316,8 @@ def load_price_list(path: str = DEFAULT_EXCEL_PATH) -> str:
         f"Columns: {', '.join(_cached_df.columns.astype(str))}. "
        
         f"Active: {active_count}, Discontinued: {discontinued_count}, "
-        f"Products with updated fields (yellow): {with_updates}"
+        f"Products with updated fields (yellow): {with_updates}, "
+        f"New products (green): {new_products}"
     )
 
 
@@ -372,6 +397,32 @@ def list_updated_products(path: str = DEFAULT_EXCEL_PATH) -> str:
         )
     return "\n".join(lines)
 
+
+@tool
+def list_new_products(path: str = DEFAULT_EXCEL_PATH) -> str:
+    """List products marked as new based on green-highlighted cells."""
+    df = _get_dataframe(path)
+    if df is None:
+        return "Price list not loaded. Call load_price_list first."
+    if "Is_New" not in df.columns:
+        return "Is_New column not found. Call load_price_list first."
+    new_products = df[df["Is_New"] == "New"]
+    if new_products.empty:
+        return "No new products (green-highlighted) found."
+    lines = []
+    for _, row in new_products.head(100).iterrows():
+        lines.append(
+            f"Brand: {row['Brand']} | "
+            f"Model: {row[MODEL_COLUMN]} | "
+            f"Description: {row[DESCRIPTION_COLUMN]} | "
+            f"Finish: {row[FINISH_COLUMN]} | "
+            f"Price: {row[PRICE_COLUMN]} | "
+            f"UOM: {row['Unit']} | "
+            f"Status: {row['Status']} | "
+            f"Sheet: {row['source_sheet']}"
+        )
+    return f"Found {len(new_products)} new product(s):\n" + "\n".join(lines)
+
 @tool
 def export_active_list(
     output_path: str = "active_price_list.xlsx",
@@ -402,16 +453,30 @@ model = AzureChatOpenAI(
     ),
     openai_api_version=os.getenv("OPENAI_API_VERSION", "2025-08-07"),
 )
-tools = [load_price_list, remove_discontinued_models, list_updated_products, find_model, export_active_list, ]
+tools = [
+    load_price_list,
+    remove_discontinued_models,
+    list_updated_products,
+    list_new_products,
+    find_model,
+    export_active_list,
+]
 agent = create_agent(model, tools=tools)
-response = agent.invoke({
-    "messages": [(
-        "human",
-        "Load the merged price list, remove all discontinued models, "
-        "then show how many active products remain."
-        "the count of updated products (yellow cells)"
-        "export the active list to active_price_list.xlsx"
-    )]
-})
 
-print("Agent Response:", response["messages"][-1].content)
+if __name__ == "__main__":
+    response = agent.invoke(
+        {
+            "messages": [
+                (
+                    "human",
+                    "Load the merged price list, remove all discontinued models, "
+                    "then show how many active products remain, "
+                    "the count of updated products (yellow cells), "
+                    "the count of new products (green cells), "
+                    "export the active list to active_price_list.xlsx, "
+                    "and list all new products.",
+                )
+            ]
+        }
+    )
+    print("Agent Response:", response["messages"][-1].content)
